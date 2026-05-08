@@ -24,6 +24,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 from dotenv import load_dotenv
 from langsmith import Client
+from langsmith.evaluation import evaluate as langsmith_evaluate
 from langchain import hub
 from langchain_core.prompts import ChatPromptTemplate
 from utils import check_env_vars, format_score, print_section_header, get_llm as get_configured_llm
@@ -187,35 +188,65 @@ def evaluate_prompt(
 
     try:
         prompt_template = pull_prompt_from_langsmith(prompt_name)
-
-        examples = list(client.list_examples(dataset_name=dataset_name))
-        print(f"   Dataset: {len(examples)} exemplos")
-
         llm = get_llm()
 
-        f1_scores = []
-        clarity_scores = []
-        precision_scores = []
+        examples_list = list(client.list_examples(dataset_name=dataset_name))
+        print(f"   Dataset: {len(examples_list)} exemplos")
 
-        print("   Avaliando exemplos...")
+        # Contadores para exibição no terminal
+        scores_collector: Dict[str, List[float]] = {"f1": [], "clarity": [], "precision": []}
+        counter = [0]
 
-        for i, example in enumerate(examples, 1):
-            result = evaluate_prompt_on_example(prompt_template, example, llm)
+        # --- Função target: gera o output para cada exemplo ---
+        def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
+            chain = prompt_template | llm
+            response = chain.invoke(inputs)
+            return {"output": response.content}
 
-            if result["answer"]:
-                f1 = evaluate_f1_score(result["question"], result["answer"], result["reference"])
-                clarity = evaluate_clarity(result["question"], result["answer"], result["reference"])
-                precision = evaluate_precision(result["question"], result["answer"], result["reference"])
+        # --- Avaliadores que enviam scores ao LangSmith ---
+        def evaluator_f1(run: Any, example: Any) -> Dict[str, Any]:
+            answer = (run.outputs or {}).get("output", "")
+            reference = (example.outputs or {}).get("reference", "")
+            question = list((example.inputs or {}).values())[0] if example.inputs else ""
+            result = evaluate_f1_score(str(question), answer, reference)
+            scores_collector["f1"].append(result["score"])
+            return {"key": "f1_score", "score": result["score"]}
 
-                f1_scores.append(f1["score"])
-                clarity_scores.append(clarity["score"])
-                precision_scores.append(precision["score"])
+        def evaluator_clarity(run: Any, example: Any) -> Dict[str, Any]:
+            answer = (run.outputs or {}).get("output", "")
+            reference = (example.outputs or {}).get("reference", "")
+            question = list((example.inputs or {}).values())[0] if example.inputs else ""
+            result = evaluate_clarity(str(question), answer, reference)
+            scores_collector["clarity"].append(result["score"])
+            return {"key": "clarity", "score": result["score"]}
 
-                print(f"      [{i}/{len(examples)}] F1:{f1['score']:.2f} Clarity:{clarity['score']:.2f} Precision:{precision['score']:.2f}")
+        def evaluator_precision(run: Any, example: Any) -> Dict[str, Any]:
+            answer = (run.outputs or {}).get("output", "")
+            reference = (example.outputs or {}).get("reference", "")
+            question = list((example.inputs or {}).values())[0] if example.inputs else ""
+            result = evaluate_precision(str(question), answer, reference)
+            scores_collector["precision"].append(result["score"])
+            counter[0] += 1
+            n = counter[0]
+            f1 = scores_collector["f1"][n-1] if n <= len(scores_collector["f1"]) else 0.0
+            clarity = scores_collector["clarity"][n-1] if n <= len(scores_collector["clarity"]) else 0.0
+            print(f"      [{n}/{len(examples_list)}] F1:{f1:.2f} Clarity:{clarity:.2f} Precision:{result['score']:.2f}")
+            return {"key": "precision", "score": result["score"]}
 
-        avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
-        avg_clarity = sum(clarity_scores) / len(clarity_scores) if clarity_scores else 0.0
-        avg_precision = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
+        print("   Avaliando exemplos e enviando scores ao LangSmith...")
+
+        experiment_prefix = prompt_name.replace("/", "--")
+        langsmith_evaluate(
+            target,
+            data=dataset_name,
+            evaluators=[evaluator_f1, evaluator_clarity, evaluator_precision],
+            experiment_prefix=experiment_prefix,
+            client=client,
+        )
+
+        avg_f1 = sum(scores_collector["f1"]) / len(scores_collector["f1"]) if scores_collector["f1"] else 0.0
+        avg_clarity = sum(scores_collector["clarity"]) / len(scores_collector["clarity"]) if scores_collector["clarity"] else 0.0
+        avg_precision = sum(scores_collector["precision"]) / len(scores_collector["precision"]) if scores_collector["precision"] else 0.0
 
         avg_helpfulness = (avg_clarity + avg_precision) / 2
         avg_correctness = (avg_f1 + avg_precision) / 2
@@ -230,6 +261,8 @@ def evaluate_prompt(
 
     except Exception as e:
         print(f"   ❌ Erro na avaliação: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "helpfulness": 0.0,
             "correctness": 0.0,
@@ -314,14 +347,11 @@ def main():
     print("Certifique-se de ter feito push dos prompts antes de avaliar:")
     print("  python src/push_prompts.py\n")
 
+    # Removido verificação de USERNAME_LANGSMITH_HUB
+    
     username = os.getenv("USERNAME_LANGSMITH_HUB", "")
-    if not username:
-        print("❌ USERNAME_LANGSMITH_HUB não configurada no .env")
-        print("   Configure seu username do LangSmith Hub antes de continuar.")
-        return 1
-
     prompts_to_evaluate = [
-        f"{username}/bug_to_user_story_v2",
+        f"{username}/bug_to_user_story_v2" if username else "bug_to_user_story_v2",
     ]
 
     all_passed = True

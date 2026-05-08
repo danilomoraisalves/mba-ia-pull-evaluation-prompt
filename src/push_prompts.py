@@ -31,7 +31,33 @@ def push_prompt_to_langsmith(prompt_name: str, prompt_data: dict) -> bool:
     Returns:
         True se sucesso, False caso contrário
     """
-    ...
+    try:
+        root_key = list(prompt_data.keys())[0]
+        data = prompt_data[root_key]
+        
+        system_prompt = data.get("system_prompt", "")
+        user_prompt = data.get("user_prompt", "")
+        
+        # Cria ChatPromptTemplate com system + user messages
+        template = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("user", user_prompt)
+        ])
+        
+        # Monta link público
+        print(f"Subindo prompt: {prompt_name}...")
+        
+        hub.push(
+            prompt_name,
+            template,
+            new_repo_description=data.get("description", ""),
+            new_repo_is_public=True
+        )
+        print(f"✓ Prompt '{prompt_name}' publicado com sucesso no LangSmith!")
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao fazer push do prompt: {e}")
+        return False
 
 
 def validate_prompt(prompt_data: dict) -> tuple[bool, list]:
@@ -44,12 +70,45 @@ def validate_prompt(prompt_data: dict) -> tuple[bool, list]:
     Returns:
         (is_valid, errors) - Tupla com status e lista de erros
     """
-    ...
+    from utils import validate_prompt_structure
+    
+    if not prompt_data or not isinstance(prompt_data, dict):
+        return False, ["Arquivo vazio ou mal formatado"]
+        
+    root_key = list(prompt_data.keys())[0]
+    data = prompt_data[root_key]
+    
+    return validate_prompt_structure(data)
 
 
 def main():
     """Função principal"""
-    ...
+    print_section_header("PUSH PROMPTS PARA O LANGSMITH")
+    
+    required_vars = ["LANGSMITH_API_KEY", "USERNAME_LANGSMITH_HUB"]
+    if not check_env_vars(required_vars):
+        return 1
+        
+    username = os.getenv("USERNAME_LANGSMITH_HUB")
+    prompt_file = "prompts/bug_to_user_story_v2.yml"
+    
+    print(f"Lendo {prompt_file}...")
+    prompt_data = load_yaml(prompt_file)
+    
+    if not prompt_data:
+        return 1
+        
+    is_valid, errors = validate_prompt(prompt_data)
+    if not is_valid:
+        print("❌ Validação do prompt falhou:")
+        for error in errors:
+            print(f"  - {error}")
+        return 1
+        
+    prompt_name = f"{username}/bug_to_user_story_v2"
+    success = push_prompt_to_langsmith(prompt_name, prompt_data)
+    
+    return 0 if success else 1
 
 
 if __name__ == "__main__":
